@@ -55,6 +55,20 @@ public static class ConnectionsExtensions
     }
 
     /// <summary>
+    /// Returns all outbound connections of the specified activity.
+    /// </summary>
+    public static IEnumerable<Connection> OutboundConnections(this ICollection<Connection> connections, IActivity activity) => connections.Where(x => x.Source.Activity == activity).ToList();
+
+    /// <summary>
+    /// Returns all outbound connections of the specified activity which are to be followed based on matching outcome names
+    /// </summary>
+    public static IEnumerable<Connection> MatchingOutboundConnections(this ICollection<Connection> connections, IActivity activity, Outcomes? outcomes = null)
+    {
+        outcomes ??= Outcomes.Default;
+        return connections.OutboundConnections(activity).Where(c => outcomes.Names.Contains(c.Source.Port));
+    }
+
+    /// <summary>
     /// Returns all inbound activities of the specified activity.
     /// </summary>
     public static IEnumerable<IActivity> InboundActivities(this ICollection<Connection> connections, IActivity activity) => connections.InboundConnections(activity).Select(x => x.Source.Activity);
@@ -103,5 +117,53 @@ public static class ConnectionsExtensions
                 yield return ancestor;
             }
         }
+    }
+
+    /// <summary>
+    /// Returns inbound connections of the specified activity that have a path back to the start activity without looping. This is similar to LeftInboundActivities 
+    /// but ensures that the connections are only on paths between the startActivity and activity without looping through activity. It also excludes connections from
+    /// dangling activities which will never be executed (since there is not path to it from startActivity)
+    /// </summary>
+    public static IEnumerable<Connection> FromStartInboundConnections(this ICollection<Connection> connections, IActivity startActivity, IActivity activity)
+    {
+        // Find all inbound connections of the activity
+        var inboundConnections = connections.InboundConnections(activity);
+
+        // Filter connections where the source activity has a path back to start
+        return inboundConnections.Where(conn => connections.HasPathBackToStart(startActivity, conn.Source.Activity, activity)).ToList();
+    }
+
+    /// <summary>
+    /// Determines if an activity has a path back to the start activity without looping through a specific activity.
+    /// </summary>
+    private static bool HasPathBackToStart(this ICollection<Connection> connections, IActivity startActivity, IActivity activity, IActivity avoidActivity)
+    {
+        if (activity == startActivity)
+            return true;
+
+        var visited = new HashSet<IActivity> { avoidActivity }; // Mark avoidActivity as visited to prevent looping
+        var stack = new Stack<IActivity>();
+        stack.Push(activity);
+
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+
+            if (current == startActivity)
+                return true; // Found a valid path back
+
+            if (visited.Contains(current))
+                continue;
+
+            visited.Add(current);
+
+            foreach (var parent in connections.InboundActivities(current))
+            {
+                if (!visited.Contains(parent))
+                    stack.Push(parent);
+            }
+        }
+
+        return false; // No valid path back found
     }
 }

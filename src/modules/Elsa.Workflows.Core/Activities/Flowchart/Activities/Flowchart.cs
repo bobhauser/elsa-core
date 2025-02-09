@@ -7,7 +7,6 @@ using Elsa.Workflows.Activities.Flowchart.Models;
 using Elsa.Workflows.Attributes;
 using Elsa.Workflows.Options;
 using Elsa.Workflows.Signals;
-using Microsoft.Extensions.Logging;
 
 namespace Elsa.Workflows.Activities.Flowchart.Activities;
 
@@ -133,92 +132,41 @@ public class Flowchart : Container
 
     private async ValueTask OnChildCompletedAsync(ActivityCompletedContext context)
     {
-        var logger = context.GetRequiredService<ILogger<Flowchart>>();
         var flowchartContext = context.TargetContext;
         var completedActivityContext = context.ChildContext;
         var completedActivity = completedActivityContext.Activity;
         var result = context.Result;
 
-        // If the complete activity's status is anything but "Completed", do not schedule its outbound activities.
-        var scheduleChildren = completedActivityContext.Status == ActivityStatus.Completed;
-        var outcomeNames = result is Outcomes outcomes
-            ? outcomes.Names
-            : [null!, "Done"];
+        if (flowchartContext.Activity != this)
+        {
+            throw new Exception("Target context activity must be this flowchart");
+        }
 
-        // Only query the outbound connections if the completed activity wasn't already completed.
-        var outboundConnections = Connections.Where(connection => connection.Source.Activity == completedActivity && outcomeNames.Contains(connection.Source.Port)).ToList();
-        var children = outboundConnections.Select(x => x.Target.Activity).ToList();
-        var scope = flowchartContext.GetProperty(ScopeProperty, () => new FlowScope());
-
-        scope.RegisterActivityExecution(completedActivity);
+        // If the completed activity's status is anything but "Completed", do not schedule its outbound activities.
+        if (completedActivityContext.Status != ActivityStatus.Completed)
+        {
+            return;
+        }
 
         // If the complete activity is a terminal node, complete the flowchart immediately.
         if (completedActivity is ITerminalNode)
         {
             await flowchartContext.CompleteActivityAsync();
+            return;
         }
-        else if (scheduleChildren)
+
+        // Determine the outcomes from the completed activity
+        var outcomes = result is Outcomes o ? o : Outcomes.Default;
+
+        // Schedule the outbound activities
+        var flowchartHandler = context.GetRequiredService<IFlowchartScheduler>();
+        await flowchartHandler.ScheduleOutboundActivitiesAsync(flowchartContext, completedActivityContext, outcomes, OnChildCompletedAsync);
+
+        // If there are not any outbound connections, complete the flowchart activity if there is no other pending work
+        if (!Connections.MatchingOutboundConnections(completedActivity, outcomes).Any())
         {
-            if (children.Any())
-            {
-                // Schedule each child, but only if all of its left inbound activities have already executed.
-                foreach (var activity in children)
-                {
-                    var existingActivity = scope.ContainsActivity(activity);
-                    scope.AddActivity(activity);
-
-                    var inboundActivities = Connections.LeftInboundActivities(activity).ToList();
-
-                    // If the completed activity is not part of the left inbound path, always allow its children to be scheduled.
-                    if (!inboundActivities.Contains(completedActivity))
-                    {
-                        await flowchartContext.ScheduleActivityAsync(activity, OnChildCompletedAsync);
-                        continue;
-                    }
-
-                    // If the activity is anything but a join activity, only schedule it if all of its left-inbound activities have executed, effectively implementing a "wait all" join. 
-                    if (activity is not IJoinNode)
-                    {
-                        var executionCount = scope.GetExecutionCount(activity);
-                        var haveInboundActivitiesExecuted = inboundActivities.All(x => scope.GetExecutionCount(x) > executionCount);
-
-                        if (haveInboundActivitiesExecuted)
-                            await flowchartContext.ScheduleActivityAsync(activity, OnChildCompletedAsync);
-                    }
-                    else
-                    {
-                        // Select an existing activity execution context for this activity, if any.
-                        var joinContext = flowchartContext.WorkflowExecutionContext.ActivityExecutionContexts.FirstOrDefault(x =>
-                            x.ParentActivityExecutionContext == flowchartContext && x.Activity == activity);
-                        var scheduleWorkOptions = new ScheduleWorkOptions
-                        {
-                            CompletionCallback = OnChildCompletedAsync,
-                            ExistingActivityExecutionContext = joinContext,
-                            PreventDuplicateScheduling = true
-                        };
-
-                        if (joinContext != null)
-                            logger.LogDebug("Next activity {ChildActivityId} is a join activity. Attaching to existing join context {JoinContext}", activity.Id, joinContext.Id);
-                        else if (!existingActivity)
-                            logger.LogDebug("Next activity {ChildActivityId} is a join activity. Creating new join context", activity.Id);
-                        else
-                        {
-                            logger.LogDebug("Next activity {ChildActivityId} is a join activity. Join context was not found, but activity is already being created", activity.Id);
-                            continue;
-                        }
-
-                        await flowchartContext.ScheduleActivityAsync(activity, scheduleWorkOptions);
-                    }
-                }
-            }
-
-            if (!children.Any())
-            {
-                await CompleteIfNoPendingWorkAsync(flowchartContext);
-            }
+            await CompleteIfNoPendingWorkAsync(flowchartContext);
         }
-
-        flowchartContext.SetProperty(ScopeProperty, scope);
     }
 
     private async Task CompleteIfNoPendingWorkAsync(ActivityExecutionContext context)

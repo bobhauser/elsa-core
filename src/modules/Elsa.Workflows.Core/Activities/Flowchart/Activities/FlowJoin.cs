@@ -37,19 +37,14 @@ public class FlowJoin : Activity, IJoinNode
     {
         var flowchartContext = context.ParentActivityExecutionContext!;
         var flowchart = (Flowchart)flowchartContext.Activity;
-        var inboundActivities = flowchart.Connections.LeftInboundActivities(this).ToList();
-        var flowScope = flowchartContext.GetProperty(Flowchart.ScopeProperty, () => new FlowScope());
-        var executionCount = flowScope.GetExecutionCount(this);
         var mode = context.Get(Mode);
 
         switch (mode)
         {
             case FlowJoinMode.WaitAll:
             {
-                // If all left-inbound activities have executed, complete & continue.
-                var haveAllInboundActivitiesExecuted = inboundActivities.All(x => flowScope.GetExecutionCount(x) > executionCount);
-
-                if (haveAllInboundActivitiesExecuted)
+                var flowchartHandler = context.GetRequiredService<IFlowchartScheduler>();
+                if (flowchartHandler.CanWaitAllProceed(context))
                 {
                     await CancelActivitiesInInboundPathAsync(flowchart, flowchartContext, context);
                     await context.CompleteActivityAsync();
